@@ -61,6 +61,20 @@ omarchy plugin add https://github.com/sergebelov/omarchy-airwaves.git --enable
 Or clone into `~/.config/omarchy/plugins/io.github.sergebelov.airwaves/` and run
 `omarchy plugin enable io.github.sergebelov.airwaves --section right`.
 
+## Remove
+
+```bash
+omarchy plugin remove io.github.sergebelov.airwaves
+```
+
+That deletes the plugin directory and drops the widget from the bar.
+
+Airwaves writes nothing outside its own directory except the stations `.m3u`
+you point it at: it appends a line when you add a station and removes those
+lines when you delete one, both only in response to an explicit click. Your
+`radio.m3u`, and any OwnTone or `mpd-mpris` configuration, are left untouched
+on removal — delete them yourself if you no longer want them.
+
 ## Settings
 
 Configurable per install from the bar settings UI, or in `shell.json`:
