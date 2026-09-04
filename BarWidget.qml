@@ -40,6 +40,34 @@ BarWidget {
   readonly property string stationsFile: String(setting("stationsFile", ""))
   readonly property int pollIntervalMs: Math.max(1, Number(setting("pollIntervalSec", 4))) * 1000
 
+  // Both mutating actions have visible latency: starting a stream takes a
+  // moment to buffer, and adding one triggers an OwnTone library rescan that
+  // runs ~25s. Without an indicator each looks like a dead click.
+  property int pendingStationId: -1
+  property bool addingStation: false
+  property string addingUrl: ""
+  property int addingBaselineCount: 0
+  property string playerState: ""
+
+  // "Arrived" means audio is actually playing this track, not merely that the
+  // queue changed -- the queue updates almost immediately, the stream does not.
+  function clearPendingIfArrived() {
+    if (pendingStationId >= 0 && playerState === "play" && nowPlayingTrackId === pendingStationId) {
+      pendingStationId = -1
+      pendingTimeout.stop()
+    }
+  }
+  onNowPlayingTrackIdChanged: clearPendingIfArrived()
+  onPlayerStateChanged: clearPendingIfArrived()
+
+  // Never strand a spinner: an unreachable stream would otherwise spin forever.
+  Timer { id: pendingTimeout; interval: 30000; onTriggered: root.pendingStationId = -1 }
+  Timer {
+    id: addingTimeout
+    interval: 90000
+    onTriggered: { root.addingStation = false; root.addingUrl = "" }
+  }
+
   // Resolved by playlist NAME at runtime: OwnTone assigns playlist ids per
   // library, so they differ on every install and cannot be hardcoded.
   property int stationPlaylistId: -1
@@ -81,6 +109,21 @@ BarWidget {
   property bool allowEmpty: false
   function applyStations(items) {
     if (items.length > 0 || allowEmpty || stations.length === 0) stations = items
+    // The rescan is done for our purposes once the new URL is in the playlist.
+    if (addingStation) {
+      var done = stations.length > addingBaselineCount
+      if (!done && addingUrl !== "")
+        for (var i = 0; i < stations.length; i++)
+          if (stations[i] && String(stations[i].path || "") === addingUrl) {
+            done = true
+            break
+          }
+      if (done) {
+        addingStation = false
+        addingUrl = ""
+        addingTimeout.stop()
+      }
+    }
   }
   function applyOutputs(items) {
     if (items.length > 0 || allowEmpty || outputs.length === 0) outputs = items
@@ -120,6 +163,8 @@ BarWidget {
   // Replacing the queue is what "pick a station" means here: these are infinite
   // streams, so there is nothing to preserve behind them.
   function playStation(trackId) {
+    pendingStationId = trackId
+    pendingTimeout.restart()
     postProc.command = ["curl", "-fsS", "--max-time", "15", "-X", "POST",
       root.owntoneApi + "/queue/items/add?uris=library:track:" + trackId + "&clear=true&playback=start"]
     postProc.running = true
@@ -144,6 +189,10 @@ BarWidget {
   function addStation(url) {
     var clean = String(url || "").trim()
     if (clean === "") return
+    addingStation = true
+    addingUrl = clean
+    addingBaselineCount = stations.length
+    addingTimeout.restart()
     postProc.command = ["curl", "-fsS", "--max-time", "15", "-X", "POST",
       root.owntoneApi + "/queue/items/add?uris=" + encodeURIComponent(clean) + "&clear=true&playback=start"]
     postProc.running = true
@@ -225,6 +274,7 @@ BarWidget {
         try {
           var d = JSON.parse(String(text || "").trim())
           root.playerItemId = (d && d.item_id !== undefined) ? d.item_id : -1
+          root.playerState = (d && d.state !== undefined) ? String(d.state) : ""
         } catch (e) { /* keep last-good */ }
       }
     }
@@ -250,6 +300,15 @@ BarWidget {
   Process { id: removeProc; onRunningChanged: if (!running) root.refreshStations() }
 
   // Poll only while the popup is open; the bar icon needs none of this.
+  // While something is in flight, poll faster so the spinner clears promptly
+  // instead of lingering up to a full interval past the event.
+  Timer {
+    interval: 1000
+    running: root.popupOpen && (root.pendingStationId >= 0 || root.addingStation)
+    repeat: true
+    onTriggered: { root.refreshNowPlaying(); if (root.addingStation) root.refreshStations() }
+  }
+
   Timer {
     interval: root.pollIntervalMs
     running: root.popupOpen
@@ -260,6 +319,48 @@ BarWidget {
 
   onPopupOpenChanged: if (popupOpen) { allowEmpty = true; refresh(); allowEmptyReset.restart() }
   Timer { id: allowEmptyReset; interval: 1500; onTriggered: root.allowEmpty = false }
+
+  // Three pulsing dots as the busy indicator. A rotating glyph was the wrong
+  // tool: font ink is not centred in its line box, so the mark orbited instead
+  // of spinning, and a rotation animator leaves `rotation` at its last value
+  // when it stops, which left the play/pause icon permanently tilted.
+  component BusyDots: Item {
+    id: dots
+    property bool active: false
+    property color dotColor: Color.foreground
+
+    implicitWidth: dotRow.implicitWidth
+    implicitHeight: Style.space(22)
+
+    Row {
+      id: dotRow
+      anchors.centerIn: parent
+      spacing: Style.space(3)
+
+      Repeater {
+        model: 3
+
+        Rectangle {
+          required property int index
+          width: Style.space(3)
+          height: width
+          radius: width / 2
+          color: dots.dotColor
+          opacity: 0.25
+          anchors.verticalCenter: parent.verticalCenter
+
+          SequentialAnimation on opacity {
+            running: dots.active
+            loops: Animation.Infinite
+            PauseAnimation { duration: index * 150 }
+            NumberAnimation { to: 1.0; duration: 220 }
+            NumberAnimation { to: 0.25; duration: 220 }
+            PauseAnimation { duration: (2 - index) * 150 }
+          }
+        }
+      }
+    }
+  }
 
   // Always present. Hiding on `hasMedia` meant that once playback stopped the
   // icon disappeared, taking with it the only way to open the popup and start
@@ -650,6 +751,8 @@ BarWidget {
             readonly property bool isActive: modelData
               && root.nowPlayingTrackId !== -1
               && modelData.id === root.nowPlayingTrackId
+            readonly property bool pending: modelData
+              && root.pendingStationId === modelData.id
 
             width: stationSection.width
             current: isActive
@@ -667,15 +770,31 @@ BarWidget {
               anchors.rightMargin: Style.space(6)
               spacing: Style.space(8)
 
-              Text {
-                textFormat: Text.PlainText
-                text: stationRow.isActive && root.isPlaying ? "\uf04c" : "\uf04b"
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.title
+              // Static glyph and busy indicator are separate items, swapped by
+              // visibility, so neither can inherit the other's state.
+              Item {
                 width: Style.space(22)
-                horizontalAlignment: Text.AlignHCenter
+                height: Style.space(22)
                 anchors.verticalCenter: parent.verticalCenter
+
+                Text {
+                  anchors.fill: parent
+                  visible: !stationRow.pending
+                  textFormat: Text.PlainText
+                  text: stationRow.isActive && root.isPlaying ? "\uf04c" : "\uf04b"
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.title
+                  horizontalAlignment: Text.AlignHCenter
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                BusyDots {
+                  anchors.centerIn: parent
+                  visible: stationRow.pending
+                  active: stationRow.pending
+                  dotColor: root.bar.foreground
+                }
               }
 
               Text {
@@ -716,6 +835,32 @@ BarWidget {
           }
         }
 
+        // Adding triggers a library rescan (~25s), far too long to leave the
+        // panel looking idle.
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+          visible: root.addingStation
+
+          BusyDots {
+            width: Style.space(22)
+            anchors.verticalCenter: parent.verticalCenter
+            active: root.addingStation
+            dotColor: root.bar.foreground
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Adding station\u2026 (scanning library)"
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            width: parent.width - Style.space(30)
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+
         Row {
           width: parent.width
           spacing: Style.space(6)
@@ -727,6 +872,8 @@ BarWidget {
             foreground: root.bar.foreground
             font.family: root.bar.fontFamily
             anchors.verticalCenter: parent.verticalCenter
+            enabled: !root.addingStation
+            opacity: enabled ? 1.0 : 0.5
             onAccepted: { root.addStation(text); text = "" }
           }
 
@@ -736,7 +883,7 @@ BarWidget {
             horizontalPadding: Style.spacing.controlPaddingX
             verticalPadding: Style.spacing.controlPaddingY
             anchors.verticalCenter: parent.verticalCenter
-            enabled: urlField.text.trim() !== ""
+            enabled: urlField.text.trim() !== "" && !root.addingStation
             opacity: enabled ? 1.0 : 0.4
             onClicked: { root.addStation(urlField.text); urlField.text = "" }
           }
