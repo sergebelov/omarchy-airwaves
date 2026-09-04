@@ -8,6 +8,8 @@ you can add to and remove from.
 A single music glyph sits in the bar. Clicking it opens a panel with everything
 else, so the bar stays quiet.
 
+<img src="preview.png" alt="The Airwaves panel: now playing, transport, speaker list and stations" width="360">
+
 ## Why
 
 PipeWire's RAOP support speaks AirPlay 1, which modern Apple receivers reject —
