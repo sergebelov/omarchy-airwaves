@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.sergebelov.airwaves",
   "name": "Airwaves",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Serge Belov",
   "license": "MIT",
   "description": "Control OwnTone from the bar: now playing, transport, AirPlay and local speaker routing, and a radio station list.",
@@ -19,7 +19,12 @@
     "displayName": "Airwaves",
     "description": "OwnTone now-playing with transport, speaker routing and radio stations",
     "category": "Media",
-    "aliases": ["owntone", "airplay", "radio", "music"],
+    "aliases": [
+      "owntone",
+      "airplay",
+      "radio",
+      "music"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
@@ -29,10 +34,37 @@
       "pollIntervalSec": 4
     },
     "schema": [
-      { "key": "apiBase", "type": "string", "label": "OwnTone API base URL", "defaultValue": "http://localhost:3689/api", "description": "Where OwnTone's REST API lives. Change the host if OwnTone runs on another machine." },
-      { "key": "stationsPlaylist", "type": "string", "label": "Stations playlist name", "defaultValue": "radio", "description": "Name of the OwnTone playlist holding your radio streams. Resolved by name, so the playlist id does not matter." },
-      { "key": "stationsFile", "type": "path", "label": "Stations .m3u file", "defaultValue": "", "description": "The file backing that playlist, written when you add or remove a station. Defaults to ~/Music/radio.m3u." },
-      { "key": "pollIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 1, "max": 60, "step": 1, "defaultValue": 4, "description": "How often the popup re-reads speakers, stations and playback state while open." }
+      {
+        "key": "apiBase",
+        "type": "string",
+        "label": "OwnTone API base URL",
+        "defaultValue": "http://localhost:3689/api",
+        "description": "Where OwnTone's REST API lives. Change the host if OwnTone runs on another machine."
+      },
+      {
+        "key": "stationsPlaylist",
+        "type": "string",
+        "label": "Stations playlist name",
+        "defaultValue": "radio",
+        "description": "Name of the OwnTone playlist holding your radio streams. Resolved by name, so the playlist id does not matter."
+      },
+      {
+        "key": "stationsFile",
+        "type": "path",
+        "label": "Stations .m3u file",
+        "defaultValue": "",
+        "description": "The file backing that playlist, written when you add or remove a station. Defaults to ~/Music/radio.m3u."
+      },
+      {
+        "key": "pollIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 4,
+        "description": "How often the popup re-reads speakers, stations and playback state while open."
+      }
     ]
   }
 }

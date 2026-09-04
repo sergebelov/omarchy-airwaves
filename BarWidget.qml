@@ -33,6 +33,40 @@ BarWidget {
   // MPRIS (via mpd-mpris) can transport-control but knows nothing about AirPlay
   // routing or the station library, so those talk to OwnTone's REST API. curl in
   // a Process is the house idiom; the shell uses no XMLHttpRequest anywhere.
+  // Responses from `apiBase` are untrusted input: the endpoint is user
+  // configurable and may be misconfigured or hostile, and the 1s busy poll
+  // would repeat any abuse. Every request carries a transfer ceiling, every
+  // body is size-checked before JSON.parse, and every retained collection is
+  // bounded in both cardinality and per-field string length.
+  readonly property int maxResponseBytes: 262144
+  readonly property int maxListItems: 200
+  readonly property int maxStringLength: 512
+
+  function apiCurl(url) {
+    return ["curl", "-fsS", "--max-time", "5",
+      "--max-filesize", String(root.maxResponseBytes), url]
+  }
+
+  function parseBounded(raw) {
+    var body = String(raw || "")
+    if (body.length === 0 || body.length > root.maxResponseBytes) return null
+    try { return JSON.parse(body) } catch (e) { return null }
+  }
+
+  function boundedString(v) {
+    return String(v === undefined || v === null ? "" : v).slice(0, root.maxStringLength)
+  }
+
+  function boundedNumber(v, lo, hi) {
+    var n = Number(v)
+    if (!isFinite(n)) return lo
+    return Math.max(lo, Math.min(hi, n))
+  }
+
+  function boundedList(v) {
+    return Array.isArray(v) ? v.slice(0, root.maxListItems) : []
+  }
+
   // Per-install configuration, declared in manifest.json's barWidget.schema so
   // it is editable from the bar settings UI rather than baked into the source.
   readonly property string owntoneApi: String(setting("apiBase", "http://localhost:3689/api"))
@@ -138,7 +172,8 @@ BarWidget {
   function verifyOutput(outputId, pin) {
     var clean = String(pin || "").trim()
     if (clean === "") return
-    postProc.command = ["curl", "-fsS", "--max-time", "15", "-X", "POST",
+    postProc.command = ["curl", "-fsS", "--max-time", "15",
+      "--max-filesize", String(root.maxResponseBytes), "-X", "POST",
       "-d", JSON.stringify({ "pin": clean }),
       root.owntoneApi + "/outputs/" + outputId + "/verification"]
     postProc.running = true
@@ -150,7 +185,8 @@ BarWidget {
   }
 
   function putJson(path, body) {
-    writeProc.command = ["curl", "-fsS", "--max-time", "10", "-X", "PUT",
+    writeProc.command = ["curl", "-fsS", "--max-time", "10",
+      "--max-filesize", String(root.maxResponseBytes), "-X", "PUT",
       "-d", JSON.stringify(body), root.owntoneApi + path]
     writeProc.running = true
   }
@@ -165,7 +201,8 @@ BarWidget {
   function playStation(trackId) {
     pendingStationId = trackId
     pendingTimeout.restart()
-    postProc.command = ["curl", "-fsS", "--max-time", "15", "-X", "POST",
+    postProc.command = ["curl", "-fsS", "--max-time", "15",
+      "--max-filesize", String(root.maxResponseBytes), "-X", "POST",
       root.owntoneApi + "/queue/items/add?uris=library:track:" + trackId + "&clear=true&playback=start"]
     postProc.running = true
   }
@@ -193,7 +230,8 @@ BarWidget {
     addingUrl = clean
     addingBaselineCount = stations.length
     addingTimeout.restart()
-    postProc.command = ["curl", "-fsS", "--max-time", "15", "-X", "POST",
+    postProc.command = ["curl", "-fsS", "--max-time", "15",
+      "--max-filesize", String(root.maxResponseBytes), "-X", "POST",
       root.owntoneApi + "/queue/items/add?uris=" + encodeURIComponent(clean) + "&clear=true&playback=start"]
     postProc.running = true
     persistProc.command = ["sh", "-c",
@@ -206,90 +244,98 @@ BarWidget {
 
   Process {
     id: playlistsProc
-    command: ["curl", "-fsS", "--max-time", "5", root.owntoneApi + "/library/playlists"]
+    command: root.apiCurl(root.owntoneApi + "/library/playlists")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (!raw) { root.owntoneReachable = false; return }
-        try {
-          var d = JSON.parse(raw)
-          var items = Array.isArray(d.items) ? d.items : []
-          var want = root.stationsPlaylistName.toLowerCase()
-          var found = -1
-          for (var i = 0; i < items.length; i++)
-            if (items[i] && String(items[i].name || "").toLowerCase() === want) {
-              found = items[i].id
-              break
-            }
-          root.stationPlaylistId = found
-          root.owntoneReachable = true
-          if (found >= 0) root.refreshStations()
-        } catch (e) {
-          root.owntoneReachable = false
-        }
+        var d = root.parseBounded(text)
+        if (!d) { root.owntoneReachable = false; return }
+        var items = root.boundedList(d.items)
+        var want = root.stationsPlaylistName.toLowerCase()
+        var found = -1
+        for (var i = 0; i < items.length; i++)
+          if (items[i] && root.boundedString(items[i].name).toLowerCase() === want) {
+            found = root.boundedNumber(items[i].id, -1, 2147483647)
+            break
+          }
+        root.stationPlaylistId = found
+        root.owntoneReachable = true
+        if (found >= 0) root.refreshStations()
       }
     }
   }
 
   Process {
     id: outputsProc
-    command: ["curl", "-fsS", "--max-time", "5", root.owntoneApi + "/outputs"]
+    command: root.apiCurl(root.owntoneApi + "/outputs")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (!raw) return
-        try {
-          var parsed = JSON.parse(raw)
-          root.applyOutputs(Array.isArray(parsed.outputs) ? parsed.outputs : [])
-        } catch (e) { /* keep last-good list rather than blanking the popup */ }
+        var d = root.parseBounded(text)
+        if (!d) return
+        // Project into a fixed shape: never retain arbitrary remote fields.
+        root.applyOutputs(root.boundedList(d.outputs).map(function (o) {
+          return {
+            "id": root.boundedString(o ? o.id : ""),
+            "name": root.boundedString(o ? o.name : ""),
+            "selected": !!(o && o.selected === true),
+            "volume": root.boundedNumber(o ? o.volume : 0, 0, 100),
+            "needs_auth_key": !!(o && o.needs_auth_key === true)
+          }
+        }))
       }
     }
   }
 
   Process {
     id: stationsProc
-    command: ["curl", "-fsS", "--max-time", "5",
-      root.owntoneApi + "/library/playlists/" + root.stationPlaylistId + "/tracks"]
+    command: root.apiCurl(root.owntoneApi + "/library/playlists/"
+      + root.stationPlaylistId + "/tracks")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (!raw) return
-        try {
-          var parsed = JSON.parse(raw)
-          root.applyStations(Array.isArray(parsed.items) ? parsed.items : [])
-        } catch (e) { /* keep last-good list */ }
+        var d = root.parseBounded(text)
+        if (!d) return
+        root.applyStations(root.boundedList(d.items).map(function (i) {
+          return {
+            "id": root.boundedNumber(i ? i.id : -1, -1, 2147483647),
+            "title": root.boundedString(i ? i.title : ""),
+            "path": root.boundedString(i ? i.path : "")
+          }
+        }))
       }
     }
   }
 
   Process {
     id: playerProc
-    command: ["curl", "-fsS", "--max-time", "5", root.owntoneApi + "/player"]
+    command: root.apiCurl(root.owntoneApi + "/player")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try {
-          var d = JSON.parse(String(text || "").trim())
-          root.playerItemId = (d && d.item_id !== undefined) ? d.item_id : -1
-          root.playerState = (d && d.state !== undefined) ? String(d.state) : ""
-        } catch (e) { /* keep last-good */ }
+        var d = root.parseBounded(text)
+        if (!d) return
+        root.playerItemId = root.boundedNumber(d.item_id, -1, 2147483647)
+        root.playerState = root.boundedString(d.state)
       }
     }
   }
 
   Process {
     id: queueProc
-    command: ["curl", "-fsS", "--max-time", "5", root.owntoneApi + "/queue"]
+    command: root.apiCurl(root.owntoneApi + "/queue")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try {
-          var d = JSON.parse(String(text || "").trim())
-          if (Array.isArray(d.items)) root.queueItems = d.items
-        } catch (e) { /* keep last-good */ }
+        var d = root.parseBounded(text)
+        if (!d) return
+        // Only the two numeric fields the now-playing lookup needs are kept.
+        root.queueItems = root.boundedList(d.items).map(function (i) {
+          return {
+            "id": root.boundedNumber(i ? i.id : -1, -1, 2147483647),
+            "track_id": root.boundedNumber(i ? i.track_id : -1, -1, 2147483647)
+          }
+        })
       }
     }
   }
